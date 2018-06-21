@@ -135,12 +135,10 @@ static void mgos_wifi_on_change_cb(void *arg) {
     }
     case MGOS_NET_EV_AP_CONNECTED: {
       s_sta_status = MGOS_WIFI_AP_CONNECTED;
-      ws = MGOS_WIFI_AP_CONNECTED;
       break;
     }
     case MGOS_NET_EV_AP_DISCONNECTED:{
       s_sta_status = MGOS_WIFI_AP_DISCONNECTED;
-      ws = MGOS_WIFI_AP_DISCONNECTED;
       break;
     }
   }
