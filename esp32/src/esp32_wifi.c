@@ -1,6 +1,18 @@
 /*
- * Copyright (c) 2014-2016 Cesanta Software Limited
+ * Copyright (c) 2014-2018 Cesanta Software Limited
  * All rights reserved
+ *
+ * Licensed under the Apache License, Version 2.0 (the ""License"");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an ""AS IS"" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #include "esp32_wifi.h"
@@ -23,7 +35,10 @@
 #include "mgos_sys_config.h"
 #include "mgos_wifi_hal.h"
 
+static bool s_inited = false;
+static bool s_started = false;
 static wifi_mode_t s_cur_mode = WIFI_MODE_NULL;
+typedef esp_err_t (*wifi_func_t)(void *arg);
 
 esp_err_t esp32_wifi_ev(system_event_t *ev) {
   bool send_ev = false;
@@ -104,12 +119,9 @@ esp_err_t esp32_wifi_ev(system_event_t *ev) {
   return ESP_OK;
 }
 
-typedef esp_err_t (*wifi_func_t)(void *arg);
-
 static esp_err_t wifi_ensure_init_and_start(wifi_func_t func, void *arg) {
-  esp_err_t r = func(arg);
-  if (r == ESP_OK) goto out;
-  if (r == ESP_ERR_WIFI_NOT_INIT) {
+  esp_err_t r;
+  if (!s_inited) {
     wifi_init_config_t icfg = WIFI_INIT_CONFIG_DEFAULT();
     r = esp_wifi_init(&icfg);
     if (r != ESP_OK) {
@@ -117,17 +129,22 @@ static esp_err_t wifi_ensure_init_and_start(wifi_func_t func, void *arg) {
       goto out;
     }
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    r = func(arg);
-    if (r == ESP_OK) goto out;
+    s_inited = true;
   }
-  if (r == ESP_ERR_WIFI_NOT_STARTED) {
+  if (!s_started) {
     r = esp_wifi_start();
     if (r != ESP_OK) {
       LOG(LL_ERROR, ("Failed to start WiFi: %d", r));
       goto out;
     }
-    r = func(arg);
+    /* Workaround for https://github.com/espressif/esp-idf/issues/1942 */
+    r = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (r != ESP_OK) {
+      LOG(LL_ERROR, ("Failed to set PS mode: %d", r));
+      goto out;
+    }
   }
+  r = func(arg);
 out:
   return r;
 }
@@ -157,7 +174,10 @@ static esp_err_t esp32_wifi_set_mode(wifi_mode_t mode) {
   if (mode == WIFI_MODE_NULL) {
     r = esp_wifi_stop();
     if (r == ESP_ERR_WIFI_NOT_INIT) r = ESP_OK; /* Nothing to stop. */
-    if (r == ESP_OK) s_cur_mode = WIFI_MODE_NULL;
+    if (r == ESP_OK) {
+      s_cur_mode = WIFI_MODE_NULL;
+      s_started = false;
+    }
     goto out;
   }
 
@@ -275,17 +295,18 @@ bool mgos_wifi_dev_sta_setup(const struct mgos_config_wifi_sta *cfg) {
   if (!mgos_conf_str_empty(cfg->cert) || !mgos_conf_str_empty(cfg->user)) {
     /* WPA-enterprise mode */
     static char *s_ca_cert_pem = NULL, *s_cert_pem = NULL, *s_key_pem = NULL;
+    const char *user = cfg->user;
 
-    esp_wifi_sta_wpa2_ent_set_username((unsigned char *) cfg->user,
-                                       strlen(cfg->user));
+    if (user == NULL) user = "";
+
+    esp_wifi_sta_wpa2_ent_set_username((unsigned char *) user, strlen(user));
 
     if (!mgos_conf_str_empty(cfg->anon_identity)) {
       esp_wifi_sta_wpa2_ent_set_identity((unsigned char *) cfg->anon_identity,
                                          strlen(cfg->anon_identity));
     } else {
       /* By default, username is used. */
-      esp_wifi_sta_wpa2_ent_set_identity((unsigned char *) cfg->user,
-                                         strlen(cfg->user));
+      esp_wifi_sta_wpa2_ent_set_identity((unsigned char *) user, strlen(user));
     }
     if (!mgos_conf_str_empty(cfg->pass)) {
       esp_wifi_sta_wpa2_ent_set_password((unsigned char *) cfg->pass,
@@ -442,7 +463,17 @@ bool mgos_wifi_dev_sta_connect(void) {
 }
 
 bool mgos_wifi_dev_sta_disconnect(void) {
-  return (esp_wifi_disconnect() == ESP_OK);
+  esp_wifi_disconnect();
+  /* If we are in station-only mode, stop WiFi task as well. */
+  if (s_cur_mode == WIFI_MODE_STA) {
+    esp_err_t r = esp_wifi_stop();
+    if (r == ESP_ERR_WIFI_NOT_INIT) r = ESP_OK; /* Nothing to stop. */
+    if (r == ESP_OK) {
+      s_cur_mode = WIFI_MODE_NULL;
+      s_started = false;
+    }
+  }
+  return true;
 }
 
 char *mgos_wifi_get_connected_ssid(void) {
@@ -472,11 +503,15 @@ void mgos_wifi_dev_init(void) {
 }
 
 void mgos_wifi_dev_deinit(void) {
-  if (s_cur_mode != WIFI_MODE_NULL) {
+  if (s_started) {
     esp_wifi_stop();
-    esp_wifi_deinit();
-    s_cur_mode = WIFI_MODE_NULL;
+    s_started = false;
   }
+  if (s_inited) {
+    esp_wifi_deinit();
+    s_inited = false;
+  }
+  s_cur_mode = WIFI_MODE_NULL;
 }
 
 char *mgos_wifi_get_sta_default_dns() {

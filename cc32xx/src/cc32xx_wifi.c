@@ -1,6 +1,18 @@
 /*
- * Copyright (c) 2014-2016 Cesanta Software Limited
+ * Copyright (c) 2014-2018 Cesanta Software Limited
  * All rights reserved
+ *
+ * Licensed under the Apache License, Version 2.0 (the ""License"");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an ""AS IS"" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #include <stdio.h>
@@ -58,6 +70,9 @@
 #define SL_WLAN_SECURITY_TYPE_BITMAP_WPA SL_SCAN_SEC_TYPE_WPA
 #define SL_WLAN_SECURITY_TYPE_BITMAP_WPA2 SL_SCAN_SEC_TYPE_WPA2
 
+#define SL_WLAN_GENERAL_PARAM_OPT_COUNTRY_CODE \
+  WLAN_GENERAL_PARAM_OPT_COUNTRY_CODE
+
 #define SlWlanNetworkEntry_t Sl_WlanNetworkEntry_t
 #define SlWlanGetRxStatResponse_t SlGetRxStatResponse_t
 
@@ -91,6 +106,10 @@ static bool restart_nwp(SlWlanMode_e role) {
 #if CS_PLATFORM == CS_P_CC3200
   cc32xx_vfs_dev_slfs_container_flush_all();
 #endif
+  /* Enable channels 12-14 */
+  const _u8 *val = "JP";
+  sl_WlanSet(SL_WLAN_CFG_GENERAL_PARAM_ID,
+             SL_WLAN_GENERAL_PARAM_OPT_COUNTRY_CODE, 2, val);
   if (sl_WlanSetMode(role) != 0) return false;
   /* Without a delay in sl_Stop subsequent sl_Start gets stuck sometimes. */
   sl_Stop(10);
@@ -431,22 +450,21 @@ char *mgos_wifi_get_sta_default_dns(void) {
 
 bool mgos_wifi_dev_start_scan(void) {
   bool ret = false;
-  int n = -1, num_res = 0;
+  int n = -1, num_res = 0, i, j;
   struct mgos_wifi_scan_result *res = NULL;
   SlWlanNetworkEntry_t info[2];
 
   if (!ensure_role_sta()) goto out;
 
-  while ((n = sl_WlanGetNetworkList(num_res, 2, info)) > 0) {
-    int i, j;
+  for (i = 0; (n = sl_WlanGetNetworkList(i, 2, info)) > 0; i += 2) {
     res = (struct mgos_wifi_scan_result *) realloc(
         res, (num_res + n) * sizeof(*res));
     if (res == NULL) {
       goto out;
     }
-    for (i = 0, j = num_res; i < n; i++) {
-      SlWlanNetworkEntry_t *e = &info[i];
-      struct mgos_wifi_scan_result *r = &res[j];
+    for (j = 0; j < n; j++) {
+      SlWlanNetworkEntry_t *e = &info[j];
+      struct mgos_wifi_scan_result *r = &res[num_res];
       _u8 sec_type = 0;
 #if SL_MAJOR_VERSION_NUM >= 2
       strncpy(r->ssid, (const char *) e->Ssid, sizeof(r->ssid));
@@ -471,15 +489,18 @@ bool mgos_wifi_dev_start_scan(void) {
         case SL_WLAN_SECURITY_TYPE_BITMAP_WPA:
           r->auth_mode = MGOS_WIFI_AUTH_MODE_WPA_PSK;
           break;
+#if SL_MAJOR_VERSION_NUM >= 2
+        case (SL_WLAN_SECURITY_TYPE_BITMAP_WPA |
+              SL_WLAN_SECURITY_TYPE_BITMAP_WPA2):
+#endif
         case SL_WLAN_SECURITY_TYPE_BITMAP_WPA2:
           r->auth_mode = MGOS_WIFI_AUTH_MODE_WPA2_PSK;
           break;
         default:
-
+          LOG(LL_INFO, ("%s Unknown sec type: %d", r->ssid, sec_type));
           continue;
       }
       num_res++;
-      j++;
     }
   }
   ret = (n == 0); /* Reached the end of the list */
